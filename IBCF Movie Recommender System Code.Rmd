@@ -1,0 +1,128 @@
+---
+title: "IBCF Movie Recommender System Code"
+author: "Azra Park (3115735)"
+date: "2023-11-10"
+output: html_document
+---
+
+```{r, warning = FALSE, message = FALSE}
+library(recommenderlab)
+library(tidyverse)
+library(reshape2)
+library(data.table)
+```
+
+### Exploratory Analysis
+```{r}
+set.seed(3)
+movies_df <- read.csv('movies.csv')
+ratings_df <- read.csv('ratings.csv')
+
+head(movies_df)
+head(ratings_df)
+
+#Summary statistics
+summary(movies_df)
+summary(ratings_df)
+
+#Creates sparse matrix for recommendation
+rating_matrix <- reshape2::dcast(ratings_df, userId~movieId, value.var = 'rating', na.rm = FALSE)
+rating_matrix <- as.matrix(rating_matrix)
+rating_matrix <- as(rating_matrix[,2:9725], 'realRatingMatrix')
+
+#User's Similarity
+user_similarity_matrix <- similarity(rating_matrix[1:20, ], method = 'cosine', which = 'users')
+image(as.matrix(user_similarity_matrix), main = 'First 20 Users\' Similarity') 
+
+#Movie's Similarity
+movie_similarity_matrix <- similarity(rating_matrix[,1:20], method = 'cosine', which = 'items')
+image(as.matrix(movie_similarity_matrix), main = 'First 20 Movies\' Similarity')
+
+#Rating values
+rating_values <- as.vector(rating_matrix@data)
+rating_table <- table(rating_values)
+rating_table
+
+ggplot(as.data.frame(rating_table[2:11]),aes(rating_values,Freq)) +
+geom_bar(stat = "identity", fill = 'light blue') +
+ggtitle('Count of Rating Values') +
+geom_text(aes(label = signif(Freq)))
+
+average_ratings <- rowMeans(rating_matrix)
+qplot(average_ratings, fill = I('steelblue'), col = I('red')) +
+  ggtitle('Average Rating by User')+
+    ylab("Freq")
+#We see a positive rating bias that will be accounted for in the Recommender model
+
+#Filter Useful Data, using central limit theorem
+movie_ratings <- rating_matrix[rowCounts(rating_matrix) >= 40,
+                               colCounts(rating_matrix) >= 40]
+```
+
+### Collaborative Filtering System
+```{r}
+set.seed(3)
+recommendation_system <- recommenderRegistry$get_entries(dataType = 'realRatingMatrix')
+#Default parameters
+recommendation_system$IBCF_realRatingMatrix$parameters
+
+model_evaluation <- evaluationScheme(movie_ratings, method="split",
+                                     train=0.8, given=-4, goodRating=4.5)
+```
+
+### Optimization and Evaluation
+```{r}
+#Find optimal k
+IBCF_tune <- function(evalScheme, parameters){
+  IBCF_topN <- evaluate(model_evaluation, method = 'IBCF',
+                        type = 'topNList', n = 10, param = list(k = parameters))
+  IBCF_topN %>% 
+    avg() %>% 
+    as_tibble() %>% 
+    mutate(param = parameters, model = 'IBCF') %>%
+    return()
+}
+tune_grid <- tibble(parameters = c(1, 5, 10, 15, 20, 25, 30))
+topN_performance <- tune_grid %>%
+           mutate(results = map(parameters, ~IBCF_tune(model_evaluation, .x))) %>%
+           unnest(cols = c(results))
+topN_performance <- as.data.frame(topN_performance)
+topN_performance
+
+par(mfrow=c(1,2))
+plot(topN_performance$parameters, topN_performance$TPR, type="b", col="red",
+     xlab="k (# of Neighbours)", ylab="True Positive Rate (Sensitivity)")
+abline()
+plot(topN_performance$parameters, topN_performance$FPR, type = 'b', col="blue",
+     xlab="k (# of Neighbours)", ylab="False Positive Rate (1 - Specificity)")
+
+#With optimal k chosen, we can view our RMSE and MAE for the predicted ratings
+recommend_model <- Recommender(getData(model_evaluation, "train"), "IBCF", 
+                        param=list(normalize = 'center', method="Cosine", k = 5))
+
+predictions <- predict(recommend_model, getData(model_evaluation, "known"), type="ratings")
+error <- calcPredictionAccuracy(predictions, getData(model_evaluation, "unknown"))
+error
+```
+
+### Recommendation system
+```{r}
+set.seed(3)
+top_10 <- function(user){
+  predicted_recommendations <- predict(object = recommend_model,
+                                       newdata = getData(model_evaluation, "known"),
+                                       n = 10)
+  user_recommended_titles <- predicted_recommendations@itemLabels[predicted_recommendations@items[[user]]]
+  user_recommended_titles_copy <- user_recommended_titles
+  for (index in 1:10){
+    user_recommended_titles_copy[index] <- as.character(subset(movies_df,
+                                           movies_df$movieId == user_recommended_titles[index])$title)
+  }
+  user_recommended_titles_copy
+}
+
+#Top 10 recommendations for user 1
+top_10(1)
+```
+
+
